@@ -43,15 +43,16 @@ class BacktestEngine:
             self._mark_to_market(day)
 
     def _rebalance(self, day: dt.date, weights: List[Dict]):
-        px_map = {}
-        for w in weights:
-            close = self.data.get_close(w["code"], day - dt.timedelta(days=5), day)
-            if close.empty:
-                continue
-            px_map[w["code"]] = float(close.iloc[-1])
-        nav = self.broker.nav(px_map)
         weight_dict = {x["code"]: x["target_weight"] for x in weights}
         existing = set(self.broker.positions.keys())
+        px_map = {}
+        for code in set(weight_dict.keys()) | existing:
+            close = self.data.get_close(code, day - dt.timedelta(days=5), day)
+            if close.empty:
+                continue
+            px_map[code] = float(close.iloc[-1])
+        nav = self.broker.nav(px_map)
+
         for code in existing - set(weight_dict.keys()):
             if code in px_map:
                 self.broker.order_target_percent(day, code, 0.0, px_map[code], nav)
