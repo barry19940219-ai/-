@@ -1,5 +1,6 @@
 wind:
   start_timeout: 15
+  start_retry_interval: 0.5
   price_adjust: F   # F=前复权；N=不复权（仅用于校验脚本）
 
 backtest:

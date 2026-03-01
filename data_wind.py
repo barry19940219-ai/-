@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -11,6 +12,8 @@ from WindPy import w
 @dataclass
 class WindConfig:
     price_adjust: str = "F"  # F=前复权, N=不复权, B=后复权
+    start_timeout: int = 15
+    start_retry_interval: float = 0.5
 
 
 class WindDataAdapter:
@@ -37,10 +40,28 @@ class WindDataAdapter:
         return code
 
     def start(self) -> None:
-        if not w.isconnected():
+        if w.isconnected():
+            return
+
+        deadline = time.time() + max(0, int(self.config.start_timeout))
+        last_error_code = None
+        last_error_data = None
+        while True:
             ret = w.start()
-            if ret.ErrorCode != 0:
-                raise RuntimeError(f"Wind 启动失败: {ret.ErrorCode} {ret.Data}")
+            if ret.ErrorCode == 0 or w.isconnected():
+                return
+
+            last_error_code = ret.ErrorCode
+            last_error_data = ret.Data
+            if time.time() >= deadline:
+                break
+            time.sleep(max(0.1, float(self.config.start_retry_interval)))
+
+        raise RuntimeError(
+            "Wind 启动失败。"
+            f"错误码: {last_error_code}, 返回: {last_error_data}。"
+            "请确认 Wind 终端已登录且 WFT 服务可用，或在终端运行 w.start() 后再执行回测。"
+        )
 
     def _wsd(self, codes: Sequence[str] | str, fields: str, start: dt.date | str, end: dt.date | str,
              extra: Optional[str] = None):

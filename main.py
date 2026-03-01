@@ -22,7 +22,11 @@ def parse_args():
 
 def run(cfg):
     os.makedirs(cfg["backtest"]["export_dir"], exist_ok=True)
-    data = WindDataAdapter(WindConfig(price_adjust=cfg["wind"]["price_adjust"]))
+    data = WindDataAdapter(WindConfig(
+        price_adjust=cfg["wind"]["price_adjust"],
+        start_timeout=cfg["wind"].get("start_timeout", 15),
+        start_retry_interval=cfg["wind"].get("start_retry_interval", 0.5),
+    ))
     data.start()
     cal = WindCalendar(data)
     start = dt.date.fromisoformat(cfg["backtest"]["start_date"])
