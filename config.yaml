@@ -1,0 +1,19 @@
+wind:
+  start_timeout: 15
+  start_retry_interval: 0.5
+  price_adjust: F   # F=前复权；N=不复权（仅用于校验脚本）
+
+backtest:
+  start_date: "2023-01-01"
+  end_date: "2024-12-31"
+  initial_cash: 1000000
+  commission_rate: 0.0003
+  stamp_duty_rate: 0.001
+  slippage_bp: 5
+  benchmark: "000300.SH"
+  rebalance_freq: "M"  # D/W/M
+  export_dir: "output"
+
+strategy:
+  enable_trade_simulation: true
+  target_bucket: "全市场"  # 全市场 / 沪深300 / 中证500 / 中证1000 / 中证2000 / 恒生科技 / 上证红利
