@@ -1,4 +1,4 @@
-name: Temporary CZ6522 multi-feed ADS-B extraction
+name: Temporary CZ6522 July 8 playback retry
 
 on:
   pull_request:
@@ -8,52 +8,62 @@ permissions:
   contents: read
 
 jobs:
-  extract:
+  fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
-    strategy:
-      fail-fast: false
-      matrix:
-        feed: [prod, staging, mlatonly]
+    timeout-minutes: 12
     steps:
-      - name: Extract B-2285 from ${{ matrix.feed }} archive
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FEED: ${{ matrix.feed }}
+      - name: Retry July 8 with forced DOM click
         shell: bash
         run: |
-          set -euxo pipefail
-          TAG="v2026.07.11-planes-readsb-${FEED}-0"
-          HEX='79a054'
-          mkdir -p work output
-          cd work
-          gh release view "$TAG" --repo adsblol/globe_history_2026 --json tagName,assets > release.json
-          cat release.json
-          gh release download "$TAG" --repo adsblol/globe_history_2026 --pattern "${TAG}.tar*"
-          mapfile -t PARTS < <(find . -maxdepth 1 -type f -name "${TAG}.tar*" | sort)
-          test ${#PARTS[@]} -gt 0
-          if [ ${#PARTS[@]} -eq 1 ] && [[ "${PARTS[0]}" == *.tar ]]; then cp "${PARTS[0]}" archive.tar; else cat "${PARTS[@]}" > archive.tar; fi
-          MATCH=$(tar -tf archive.tar | grep -E "traces/[0-9a-fA-F]{2}/trace_full_${HEX}\.json$" | head -n1 || true)
-          if [ -n "$MATCH" ]; then
-            tar -xf archive.tar "$MATCH"
-            cp "$MATCH" "../output/2026-07-11_B-2285_79a054_${FEED}.json.gz"
-            python3 - <<'PY'
-          import gzip,json,glob,datetime,os
-          fn=glob.glob('../output/*')[0]
-          with gzip.open(fn,'rt') as f:d=json.load(f)
-          tr=d.get('trace',[]); base=d.get('timestamp',0)
-          print(os.path.basename(fn),{'points':len(tr),'icao':d.get('icao'),'registration':d.get('r')})
-          for p in tr:
-              extra=p[8] if len(p)>8 and isinstance(p[8],dict) else {}
-              if extra.get('flight'): print('flight',extra.get('flight'),'time',datetime.datetime.fromtimestamp(base+p[0],datetime.UTC),'latlon',p[1:3])
-          PY
-          else
-            echo "no matching trace" > "../output/${FEED}_no_trace.txt"
-          fi
-      - name: Upload feed trace
+          set -u
+          mkdir -p output
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest >/dev/null 2>&1
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          const f={date:'2026-07-08',id:'408e4798',ts:'1783476300',reg:'B-32PR'};
+          const summary={...f}; let browser;
+          try{
+            browser=await chromium.launch({channel:'chrome',headless:false,args:['--no-sandbox','--disable-blink-features=AutomationControlled','--disable-dev-shm-usage','--start-maximized']});
+            const context=await browser.newContext({viewport:null,locale:'en-US',timezoneId:'UTC'});
+            await context.addInitScript(()=>{
+              Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+              Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+              Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+            });
+            const page=await context.newPage();
+            await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
+            for(let i=0;i<45;i++){await page.waitForTimeout(1000);if(await page.locator('#tbl-datatable').count())break;}
+            const challenge=await context.newPage();
+            await challenge.goto(`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${f.id}&timestamp=${f.ts}`,{waitUntil:'domcontentloaded',timeout:120000}).catch(()=>null);
+            for(let i=0;i<70;i++){
+              await challenge.waitForTimeout(1000);
+              const txt=(await challenge.title().catch(()=>''))+' '+(await challenge.locator('body').innerText().catch(()=>''));
+              if(!/just a moment|performing security verification|verify you are human/i.test(txt))break;
+            }
+            await challenge.close(); await page.bringToFront();
+            await page.evaluate(()=>{
+              document.querySelectorAll('#gravitoCMPRoot, .gravitoCMP-opaque-container, ins[data-anchor-shown], iframe[aria-label="Advertisement"]').forEach(x=>x.remove());
+            });
+            const promise=page.waitForResponse(r=>r.url().includes('flight-playback.json')&&r.url().includes(f.id),{timeout:150000});
+            const button=page.locator(`#btn-playback-${f.id}`);
+            await button.evaluate(el=>el.click());
+            const resp=await promise; const body=await resp.body();
+            const file=`output/${f.date}_${f.reg}_${f.id}.json`; fs.writeFileSync(file,body);
+            const d=JSON.parse(body.toString()); const flight=d?.result?.response?.data?.flight;
+            Object.assign(summary,{status:resp.status(),bytes:body.length,points:flight?.track?.length,registration:flight?.aircraft?.identification?.registration,callsign:flight?.identification?.callsign,file});
+            await context.close();
+          }catch(e){summary.error=String(e);fs.writeFileSync('output/error.txt',String(e));}
+          finally{if(browser)await browser.close().catch(()=>{});fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));}
+          JS
+          xvfb-run -a node fetch.mjs || true
+          cat output/summary.json
+      - name: Upload July 8 playback
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-0711-${{ matrix.feed }}
+          name: cz6522-track-2026-07-08-retry
           path: output/*
           if-no-files-found: error
           retention-days: 1
