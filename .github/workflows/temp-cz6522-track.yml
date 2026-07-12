@@ -1,0 +1,53 @@
+name: Temporary CZ6522 ADS-B fetch
+
+on:
+  push:
+    branches: [temp-cz6522-track]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch recent full traces from public readsb providers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p traces
+          hexes=(79a054 7809f6 79a058 782369 79a053 781550)
+          providers=(
+            "https://globe.airplanes.live/data/traces"
+            "https://globe.adsb.fi/data/traces"
+            "https://globe.adsb.lol/data/traces"
+          )
+          for hex in "${hexes[@]}"; do
+            suffix="${hex: -2}"
+            for provider in "${providers[@]}"; do
+              host=$(echo "$provider" | sed -E 's#https://([^/]+)/.*#\1#')
+              out="traces/${host}_${hex}.json"
+              curl -A 'Mozilla/5.0' -fL --retry 3 --connect-timeout 20 --max-time 90 \
+                "$provider/$suffix/trace_full_${hex}.json" -o "$out" || rm -f "$out"
+            done
+          done
+          ls -lah traces
+          python3 - <<'PY'
+          import json, glob, os
+          for fn in glob.glob('traces/*.json'):
+              try:
+                  d=json.load(open(fn))
+                  tr=d.get('trace', [])
+                  print(os.path.basename(fn), 'points=', len(tr), 'base=', d.get('timestamp'), 'icao=', d.get('icao'))
+              except Exception as e:
+                  print('BAD', fn, e)
+          PY
+      - name: Upload traces
+        uses: actions/upload-artifact@v4
+        with:
+          name: cz6522-public-traces
+          path: traces/*.json
+          if-no-files-found: error
+          retention-days: 1
