@@ -1,4 +1,4 @@
-name: Temporary CZ6522 per-flight playback extraction
+name: Temporary CZ6522 daily ADS-B archive extraction
 
 on:
   pull_request:
@@ -8,109 +8,51 @@ permissions:
   contents: read
 
 jobs:
-  fetch:
+  extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - date: '2026-07-10'
-            id: '40974157'
-            ts: '1783649100'
-            reg: 'B-9911'
-          - date: '2026-07-09'
-            id: '4092f97f'
-            ts: '1783562700'
-            reg: 'B-2287'
-          - date: '2026-07-08'
-            id: '408e4798'
-            ts: '1783476300'
-            reg: 'B-32PR'
-          - date: '2026-07-07'
-            id: '408a4357'
-            ts: '1783389900'
-            reg: 'B-2284'
-          - date: '2026-07-06'
-            id: '4085e60c'
-            ts: '1783303500'
-            reg: 'B-303K'
-    env:
-      FLIGHT_DATE: ${{ matrix.date }}
-      FLIGHT_ID: ${{ matrix.id }}
-      FLIGHT_TS: ${{ matrix.ts }}
-      FLIGHT_REG: ${{ matrix.reg }}
+    timeout-minutes: 45
     steps:
-      - name: Extract one historical playback with headed Chrome
+      - name: Download 2026-07-11 public ADS-B archive and extract B-2285
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -u
-          mkdir -p output
-          npm init -y >/dev/null 2>&1
-          npm install playwright@latest >/dev/null 2>&1
-          cat > fetch.mjs <<'JS'
-          import { chromium } from 'playwright';
-          import fs from 'fs';
-          const f={date:process.env.FLIGHT_DATE,id:process.env.FLIGHT_ID,ts:process.env.FLIGHT_TS,reg:process.env.FLIGHT_REG};
-          const summary={...f};
-          let browser;
-          try{
-            browser=await chromium.launch({channel:'chrome',headless:false,args:['--no-sandbox','--disable-blink-features=AutomationControlled','--disable-dev-shm-usage','--start-maximized']});
-            const context=await browser.newContext({viewport:null,locale:'en-US',timezoneId:'UTC'});
-            await context.addInitScript(()=>{
-              Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
-              Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
-              Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
-            });
-            const page=await context.newPage();
-            async function loadHistory(){
-              await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
-              for(let i=0;i<45;i++){await page.waitForTimeout(1000);if(await page.locator('#tbl-datatable').count())return;}
-              throw new Error('history table unavailable');
-            }
-            await loadHistory();
-            const challenge=await context.newPage();
-            await challenge.goto(`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${f.id}&timestamp=${f.ts}`,{waitUntil:'domcontentloaded',timeout:120000}).catch(()=>null);
-            for(let i=0;i<70;i++){
-              await challenge.waitForTimeout(1000);
-              const txt=(await challenge.title().catch(()=>''))+' '+(await challenge.locator('body').innerText().catch(()=>'');
-              if(!/just a moment|performing security verification|verify you are human/i.test(txt))break;
-            }
-            await challenge.close();
-            await page.bringToFront();
-            const responsePromise=page.waitForResponse(r=>r.url().includes('flight-playback.json')&&r.url().includes(f.id),{timeout:150000});
-            const button=page.locator(`#btn-playback-${f.id}`);
-            await button.scrollIntoViewIfNeeded();
-            await button.click({timeout:30000});
-            const resp=await responsePromise;
-            const body=await resp.body();
-            const file=`output/${f.date}_${f.reg}_${f.id}.json`;
-            fs.writeFileSync(file,body);
-            summary.status=resp.status(); summary.contentType=resp.headers()['content-type']; summary.bytes=body.length; summary.file=file;
-            try{
-              const d=JSON.parse(body.toString()); const flight=d?.result?.response?.data?.flight;
-              summary.points=flight?.track?.length??null;
-              summary.callsign=flight?.identification?.callsign??null;
-              summary.registration=flight?.aircraft?.identification?.registration??null;
-            }catch(e){summary.parseError=String(e);}
-            await page.screenshot({path:'output/final.png',fullPage:true}).catch(()=>{});
-            await context.close();
-          }catch(e){summary.error=String(e);fs.writeFileSync('output/error.txt',String(e));}
-          finally{if(browser)await browser.close().catch(()=>{});fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));}
-          JS
-          # Correct a parser typo introduced by heredoc readability before execution.
+          set -euxo pipefail
+          TAG='v2026.07.11-planes-readsb-prod-0'
+          HEX='79a054'
+          mkdir -p work output
+          cd work
+          gh release view "$TAG" --repo adsblol/globe_history_2026 --json tagName,assets > release.json
+          cat release.json
+          gh release download "$TAG" --repo adsblol/globe_history_2026 --pattern "${TAG}.tar*"
+          ls -lh
+          mapfile -t PARTS < <(find . -maxdepth 1 -type f -name "${TAG}.tar*" | sort)
+          test ${#PARTS[@]} -gt 0
+          if [ ${#PARTS[@]} -eq 1 ] && [[ "${PARTS[0]}" == *.tar ]]; then
+            cp "${PARTS[0]}" archive.tar
+          else
+            cat "${PARTS[@]}" > archive.tar
+          fi
+          ls -lh archive.tar
+          tar -tf archive.tar | grep -E "traces/[0-9a-fA-F]{2}/trace_full_${HEX}\.json$" | tee matches.txt
+          MATCH=$(head -n1 matches.txt)
+          test -n "$MATCH"
+          tar -xf archive.tar "$MATCH"
+          cp "$MATCH" ../output/2026-07-11_B-2285_79a054.json.gz
           python3 - <<'PY'
-          p='fetch.mjs'
-          s=open(p).read().replace("catch(()=>'');", "catch(()=>''));")
-          open(p,'w').write(s)
+          import gzip,json,datetime
+          fn='../output/2026-07-11_B-2285_79a054.json.gz'
+          with gzip.open(fn,'rt') as f:d=json.load(f)
+          tr=d.get('trace',[]); base=d.get('timestamp',0)
+          print({'icao':d.get('icao'),'registration':d.get('r'),'type':d.get('t'),'points':len(tr),'timestamp':base})
+          if tr:
+              times=[base+p[0] for p in tr]
+              print('UTC',datetime.datetime.fromtimestamp(min(times),datetime.UTC),datetime.datetime.fromtimestamp(max(times),datetime.UTC))
           PY
-          xvfb-run -a node fetch.mjs || true
-          cat output/summary.json
-      - name: Upload one playback file
-        if: always()
+      - name: Upload extracted B-2285 trace
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-track-${{ matrix.date }}-${{ matrix.id }}
+          name: cz6522-2026-07-11-B-2285
           path: output/*
           if-no-files-found: error
           retention-days: 1
