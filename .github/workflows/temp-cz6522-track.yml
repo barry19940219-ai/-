@@ -3,6 +3,8 @@ name: Temporary CZ6522 ADS-B fetch
 on:
   push:
     branches: [temp-cz6522-track]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
