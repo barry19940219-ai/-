@@ -1,11 +1,10 @@
-name: Temporary CZ6522 historical track fetch
+name: Temporary CZ6522 browser track fetch
 
 on:
   push:
     branches: [temp-cz6522-track]
   pull_request:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,72 +12,61 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - name: Fetch historical FR24 playback JSON
+      - name: Fetch with Playwright browser
         shell: bash
         run: |
           set -euxo pipefail
-          python3 -m pip install --quiet requests beautifulsoup4 lxml
           mkdir -p output
-          cat > /tmp/fetch.py <<'PY'
-          import json, re, sys, time
-          from pathlib import Path
-          import requests
-          from bs4 import BeautifulSoup
-
-          base='https://www.flightradar24.com'
-          api='https://api.flightradar24.com/common/v1'
-          s=requests.Session()
-          s.headers.update({
-              'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
-              'Origin':base,
-              'Referer':base+'/'
-          })
-          url=base+'/data/flights/cz6522'
-          r=s.get(url,timeout=60)
-          print('history page',r.status_code,len(r.content),r.url)
-          Path('output/history_page.html').write_bytes(r.content)
-          Path('output/cookies.json').write_text(json.dumps(s.cookies.get_dict(),indent=2),encoding='utf-8')
-          rows=[]
-          if r.ok:
-              soup=BeautifulSoup(r.text,'lxml')
-              for tr in soup.select('#tbl-datatable tbody tr'):
-                  txt=' '.join(tr.stripped_strings)
-                  btn=tr.select_one('.btn-playback')
-                  if not btn: continue
-                  fid=btn.get('data-flight-hex')
-                  ts=btn.get('data-timestamp')
-                  rows.append({'text':txt,'flight_id':fid,'timestamp':ts})
-          print('playback rows',len(rows))
-          print(json.dumps(rows,ensure_ascii=False,indent=2))
-          Path('output/rows.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
-          targets=['06 Jul 2026','07 Jul 2026','08 Jul 2026','09 Jul 2026','10 Jul 2026','11 Jul 2026']
-          selected=[row for row in rows if any(d in row['text'] for d in targets)] or rows[:10]
-          summary=[]
-          for i,row in enumerate(selected):
-              fid=row['flight_id']; ts=row['timestamp']
-              purl=f'{api}/flight-playback.json?flightId={fid}&timestamp={ts}'
-              pr=s.get(purl,timeout=90)
-              print('playback',i,pr.status_code,len(pr.content),purl)
-              safe=re.sub(r'[^A-Za-z0-9_-]+','_',row['text'])[:80]
-              fn=Path(f'output/playback_{i:02d}_{safe}.json')
-              fn.write_bytes(pr.content)
-              rec={'row':row,'status':pr.status_code,'bytes':len(pr.content),'file':fn.name,'url':purl,'content_type':pr.headers.get('content-type')}
-              try:
-                  data=pr.json()
-                  rec['top_keys']=list(data) if isinstance(data,dict) else type(data).__name__
-              except Exception as e: rec['json_error']=repr(e)
-              summary.append(rec)
-              time.sleep(1)
-          Path('output/summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
-          PY
-          python3 /tmp/fetch.py || true
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest >/dev/null 2>&1
+          npx playwright install chromium --with-deps >/dev/null 2>&1
+          cat > /tmp/fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          const browser = await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled','--no-sandbox']});
+          const context = await browser.newContext({
+            userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            viewport:{width:1440,height:1000}, locale:'en-US', timezoneId:'UTC'
+          });
+          const page = await context.newPage();
+          await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
+          for (let i=0;i<12;i++) {
+            await page.waitForTimeout(5000);
+            console.log('wait',i,'title=',await page.title(),'url=',page.url());
+            if ((await page.locator('#tbl-datatable').count())>0) break;
+          }
+          await page.screenshot({path:'output/page.png',fullPage:true});
+          fs.writeFileSync('output/page.html',await page.content());
+          const rows=await page.locator('#tbl-datatable tbody tr').evaluateAll(trs=>trs.map(tr=>{
+            const b=tr.querySelector('.btn-playback');
+            return b?{text:tr.innerText.replace(/\s+/g,' ').trim(),flight_id:b.getAttribute('data-flight-hex'),timestamp:b.getAttribute('data-timestamp'),outer:b.outerHTML}:null;
+          }).filter(Boolean));
+          console.log(JSON.stringify(rows,null,2));
+          fs.writeFileSync('output/rows.json',JSON.stringify(rows,null,2));
+          const wanted=rows.filter(r=>/0[6-9] Jul 2026|10 Jul 2026|11 Jul 2026/.test(r.text));
+          const summary=[];
+          for (let i=0;i<wanted.length;i++) {
+            const r=wanted[i];
+            const url=`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${r.flight_id}&timestamp=${r.timestamp}`;
+            const resp=await context.request.get(url,{headers:{Origin:'https://www.flightradar24.com',Referer:'https://www.flightradar24.com/'},timeout:120000});
+            const body=await resp.body();
+            fs.writeFileSync(`output/playback_${i}_${r.flight_id}.json`,body);
+            summary.push({...r,url,status:resp.status(),bytes:body.length,contentType:resp.headers()['content-type']});
+            console.log(summary.at(-1));
+          }
+          fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));
+          fs.writeFileSync('output/cookies.json',JSON.stringify(await context.cookies(),null,2));
+          await browser.close();
+          if (!wanted.length) process.exitCode=2;
+          JS
+          node /tmp/fetch.mjs || true
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
-      - name: Upload historical tracks
+      - name: Upload browser results
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-historical-playback
+          name: cz6522-browser-playback
           path: output/*
           if-no-files-found: error
           retention-days: 1
