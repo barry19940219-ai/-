@@ -1,4 +1,4 @@
-name: Temporary CZ6522 daily ADS-B archive extraction
+name: Temporary CZ6522 multi-feed ADS-B extraction
 
 on:
   pull_request:
@@ -10,49 +10,50 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        feed: [prod, staging, mlatonly]
     steps:
-      - name: Download 2026-07-11 public ADS-B archive and extract B-2285
+      - name: Extract B-2285 from ${{ matrix.feed }} archive
         env:
           GH_TOKEN: ${{ github.token }}
+          FEED: ${{ matrix.feed }}
         shell: bash
         run: |
           set -euxo pipefail
-          TAG='v2026.07.11-planes-readsb-prod-0'
+          TAG="v2026.07.11-planes-readsb-${FEED}-0"
           HEX='79a054'
           mkdir -p work output
           cd work
           gh release view "$TAG" --repo adsblol/globe_history_2026 --json tagName,assets > release.json
           cat release.json
           gh release download "$TAG" --repo adsblol/globe_history_2026 --pattern "${TAG}.tar*"
-          ls -lh
           mapfile -t PARTS < <(find . -maxdepth 1 -type f -name "${TAG}.tar*" | sort)
           test ${#PARTS[@]} -gt 0
-          if [ ${#PARTS[@]} -eq 1 ] && [[ "${PARTS[0]}" == *.tar ]]; then
-            cp "${PARTS[0]}" archive.tar
-          else
-            cat "${PARTS[@]}" > archive.tar
-          fi
-          ls -lh archive.tar
-          tar -tf archive.tar | grep -E "traces/[0-9a-fA-F]{2}/trace_full_${HEX}\.json$" | tee matches.txt
-          MATCH=$(head -n1 matches.txt)
-          test -n "$MATCH"
-          tar -xf archive.tar "$MATCH"
-          cp "$MATCH" ../output/2026-07-11_B-2285_79a054.json.gz
-          python3 - <<'PY'
-          import gzip,json,datetime
-          fn='../output/2026-07-11_B-2285_79a054.json.gz'
+          if [ ${#PARTS[@]} -eq 1 ] && [[ "${PARTS[0]}" == *.tar ]]; then cp "${PARTS[0]}" archive.tar; else cat "${PARTS[@]}" > archive.tar; fi
+          MATCH=$(tar -tf archive.tar | grep -E "traces/[0-9a-fA-F]{2}/trace_full_${HEX}\.json$" | head -n1 || true)
+          if [ -n "$MATCH" ]; then
+            tar -xf archive.tar "$MATCH"
+            cp "$MATCH" "../output/2026-07-11_B-2285_79a054_${FEED}.json.gz"
+            python3 - <<'PY'
+          import gzip,json,glob,datetime,os
+          fn=glob.glob('../output/*')[0]
           with gzip.open(fn,'rt') as f:d=json.load(f)
           tr=d.get('trace',[]); base=d.get('timestamp',0)
-          print({'icao':d.get('icao'),'registration':d.get('r'),'type':d.get('t'),'points':len(tr),'timestamp':base})
-          if tr:
-              times=[base+p[0] for p in tr]
-              print('UTC',datetime.datetime.fromtimestamp(min(times),datetime.UTC),datetime.datetime.fromtimestamp(max(times),datetime.UTC))
+          print(os.path.basename(fn),{'points':len(tr),'icao':d.get('icao'),'registration':d.get('r')})
+          for p in tr:
+              extra=p[8] if len(p)>8 and isinstance(p[8],dict) else {}
+              if extra.get('flight'): print('flight',extra.get('flight'),'time',datetime.datetime.fromtimestamp(base+p[0],datetime.UTC),'latlon',p[1:3])
           PY
-      - name: Upload extracted B-2285 trace
+          else
+            echo "no matching trace" > "../output/${FEED}_no_trace.txt"
+          fi
+      - name: Upload feed trace
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-2026-07-11-B-2285
+          name: cz6522-0711-${{ matrix.feed }}
           path: output/*
           if-no-files-found: error
           retention-days: 1
