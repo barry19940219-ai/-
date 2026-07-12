@@ -1,8 +1,6 @@
 name: Temporary CZ6522 historical ADS-B extraction
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -34,42 +32,15 @@ jobs:
           set -euxo pipefail
           tag="v${{ matrix.date }}-planes-readsb-prod-0"
           mkdir -p parts output
-          gh release download "$tag" \
-            --repo adsblol/globe_history_2026 \
-            --pattern '*.tar*' \
-            --dir parts
-          ls -lh parts
-
+          gh release download "$tag" --repo adsblol/globe_history_2026 --pattern '*.tar*' --dir parts
       - name: Extract target aircraft trace
         shell: bash
         run: |
           set -euxo pipefail
           mapfile -t parts < <(find parts -maxdepth 1 -type f -printf '%f\n' | sort | sed 's#^#parts/#')
-          printf 'Using parts:\n%s\n' "${parts[*]}"
           target=$(cat "${parts[@]}" | tar -tf - | grep -E "trace_full_${{ matrix.hex }}\\.json$" | head -n1)
           test -n "$target"
-          echo "Found: $target"
           cat "${parts[@]}" | tar -xOf - "$target" > "output/${{ matrix.date }}_${{ matrix.reg }}_${{ matrix.hex }}.json.gz"
-          gzip -t "output/${{ matrix.date }}_${{ matrix.reg }}_${{ matrix.hex }}.json.gz"
-          python3 - <<'PY'
-          import gzip, json, glob, os, datetime
-          fn=glob.glob('output/*.json.gz')[0]
-          with gzip.open(fn,'rt') as f:
-              d=json.load(f)
-          tr=d.get('trace',[])
-          print('file',os.path.basename(fn),'icao',d.get('icao'),'reg',d.get('r'),'base',d.get('timestamp'),'points',len(tr))
-          calls={}
-          for p in tr:
-              if len(p)>8 and isinstance(p[8],dict):
-                  fl=(p[8].get('flight') or '').strip()
-                  if fl: calls[fl]=calls.get(fl,0)+1
-          print('callsigns',sorted(calls.items(), key=lambda x:-x[1])[:20])
-          if tr:
-              base=d.get('timestamp',0)
-              print('start',datetime.datetime.fromtimestamp(base+tr[0][0],datetime.timezone.utc),tr[0][1:5])
-              print('end',datetime.datetime.fromtimestamp(base+tr[-1][0],datetime.timezone.utc),tr[-1][1:5])
-          PY
-
       - name: Upload extracted trace
         uses: actions/upload-artifact@v4
         with:
