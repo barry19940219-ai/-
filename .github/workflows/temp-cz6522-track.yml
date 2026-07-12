@@ -1,4 +1,4 @@
-name: Temporary CZ6522 ADS-B fetch
+name: Temporary CZ6522 historical track fetch
 
 on:
   push:
@@ -15,41 +15,90 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Fetch recent full traces from public readsb providers
+      - name: Fetch historical FR24 playback JSON
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p traces
-          hexes=(79a054 7809f6 79a058 782369 79a053 781550)
-          providers=(
-            "https://globe.airplanes.live/data/traces"
-            "https://globe.adsb.fi/data/traces"
-            "https://globe.adsb.lol/data/traces"
-          )
-          for hex in "${hexes[@]}"; do
-            suffix="${hex: -2}"
-            for provider in "${providers[@]}"; do
-              host=$(echo "$provider" | sed -E 's#https://([^/]+)/.*#\1#')
-              out="traces/${host}_${hex}.json"
-              curl -A 'Mozilla/5.0' -fL --retry 3 --connect-timeout 20 --max-time 90 \
-                "$provider/$suffix/trace_full_${hex}.json" -o "$out" || rm -f "$out"
-            done
-          done
-          ls -lah traces
-          python3 - <<'PY'
-          import json, glob, os
-          for fn in glob.glob('traces/*.json'):
+          python3 -m pip install --quiet requests beautifulsoup4 lxml
+          mkdir -p output
+          cat > /tmp/fetch.py <<'PY'
+          import json, re, sys, time
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          base='https://www.flightradar24.com'
+          api='https://api.flightradar24.com/common/v1'
+          s=requests.Session()
+          s.headers.update({
+              'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36',
+              'Origin':base,
+              'Referer':base+'/'
+          })
+          url=base+'/data/flights/cz6522'
+          r=s.get(url,timeout=60)
+          print('history page',r.status_code,len(r.content),r.url)
+          r.raise_for_status()
+          Path('output/history_page.html').write_bytes(r.content)
+          soup=BeautifulSoup(r.text,'lxml')
+          rows=[]
+          for tr in soup.select('#tbl-datatable tbody tr'):
+              txt=' '.join(tr.stripped_strings)
+              btn=tr.select_one('.btn-playback')
+              if not btn: continue
+              fid=btn.get('data-flight-hex')
+              ts=btn.get('data-timestamp')
+              rows.append({'text':txt,'flight_id':fid,'timestamp':ts})
+          print('playback rows',len(rows))
+          print(json.dumps(rows,ensure_ascii=False,indent=2))
+          Path('output/rows.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          targets=['06 Jul 2026','07 Jul 2026','08 Jul 2026','09 Jul 2026','10 Jul 2026','11 Jul 2026']
+          selected=[]
+          for row in rows:
+              if any(d in row['text'] for d in targets): selected.append(row)
+          if not selected:
+              # Keep latest completed rows as fallback
+              selected=rows[:10]
+          summary=[]
+          for i,row in enumerate(selected):
+              fid=row['flight_id']; ts=row['timestamp']
+              purl=f'{api}/flight-playback.json?flightId={fid}&timestamp={ts}'
+              pr=s.get(purl,timeout=90)
+              print('playback',i,pr.status_code,len(pr.content),purl)
+              safe=re.sub(r'[^A-Za-z0-9_-]+','_',row['text'])[:80]
+              fn=Path(f'output/playback_{i:02d}_{safe}.json')
+              fn.write_bytes(pr.content)
+              rec={'row':row,'status':pr.status_code,'bytes':len(pr.content),'file':fn.name,'url':purl}
               try:
-                  d=json.load(open(fn))
-                  tr=d.get('trace', [])
-                  print(os.path.basename(fn), 'points=', len(tr), 'base=', d.get('timestamp'), 'icao=', d.get('icao'))
-              except Exception as e:
-                  print('BAD', fn, e)
+                  data=pr.json()
+                  rec['top_keys']=list(data) if isinstance(data,dict) else type(data).__name__
+                  # Record common track containers and their lengths
+                  def walk(o,path=''):
+                      out=[]
+                      if isinstance(o,dict):
+                          for k,v in o.items():
+                              p=f'{path}.{k}' if path else k
+                              if isinstance(v,list) and v and isinstance(v[0],(dict,list)):
+                                  out.append((p,len(v)))
+                              if len(out)<20 and isinstance(v,(dict,list)): out.extend(walk(v,p))
+                      elif isinstance(o,list):
+                          for j,v in enumerate(o[:3]):
+                              if isinstance(v,(dict,list)): out.extend(walk(v,f'{path}[{j}]'))
+                      return out[:30]
+                  rec['lists']=walk(data)
+              except Exception as e: rec['json_error']=repr(e)
+              summary.append(rec)
+              time.sleep(1)
+          Path('output/summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+          if not any(x['status']==200 and x['bytes']>500 for x in summary):
+              print('No usable playback response',file=sys.stderr); sys.exit(2)
           PY
-      - name: Upload traces
+          python3 /tmp/fetch.py
+          find output -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+      - name: Upload historical tracks
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-public-traces
-          path: traces/*.json
+          name: cz6522-historical-playback
+          path: output/*
           if-no-files-found: error
           retention-days: 1
