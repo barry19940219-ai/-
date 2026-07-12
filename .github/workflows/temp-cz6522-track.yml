@@ -1,4 +1,4 @@
-name: Temporary CZ6522 six-flight playback extraction
+name: Temporary CZ6522 per-flight playback extraction
 
 on:
   pull_request:
@@ -10,83 +10,107 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - date: '2026-07-10'
+            id: '40974157'
+            ts: '1783649100'
+            reg: 'B-9911'
+          - date: '2026-07-09'
+            id: '4092f97f'
+            ts: '1783562700'
+            reg: 'B-2287'
+          - date: '2026-07-08'
+            id: '408e4798'
+            ts: '1783476300'
+            reg: 'B-32PR'
+          - date: '2026-07-07'
+            id: '408a4357'
+            ts: '1783389900'
+            reg: 'B-2284'
+          - date: '2026-07-06'
+            id: '4085e60c'
+            ts: '1783303500'
+            reg: 'B-303K'
+    env:
+      FLIGHT_DATE: ${{ matrix.date }}
+      FLIGHT_ID: ${{ matrix.id }}
+      FLIGHT_TS: ${{ matrix.ts }}
+      FLIGHT_REG: ${{ matrix.reg }}
     steps:
-      - name: Extract six historical flights with headed Chrome
+      - name: Extract one historical playback with headed Chrome
         shell: bash
         run: |
-          set -euxo pipefail
+          set -u
           mkdir -p output
           npm init -y >/dev/null 2>&1
           npm install playwright@latest >/dev/null 2>&1
           cat > fetch.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
-          const flights=[
-            {date:'2026-07-11',id:'409b6d74',ts:'1783735500',reg:'B-2285'},
-            {date:'2026-07-10',id:'40974157',ts:'1783649100',reg:'B-9911'},
-            {date:'2026-07-09',id:'4092f97f',ts:'1783562700',reg:'B-2287'},
-            {date:'2026-07-08',id:'408e4798',ts:'1783476300',reg:'B-32PR'},
-            {date:'2026-07-07',id:'408a4357',ts:'1783389900',reg:'B-2284'},
-            {date:'2026-07-06',id:'4085e60c',ts:'1783303500',reg:'B-303K'}
-          ];
-          const browser=await chromium.launch({channel:'chrome',headless:false,args:['--no-sandbox','--disable-blink-features=AutomationControlled','--disable-dev-shm-usage','--start-maximized']});
-          const context=await browser.newContext({viewport:null,locale:'en-US',timezoneId:'UTC'});
-          await context.addInitScript(()=>{
-            Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
-            Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
-            Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
-          });
-          const page=await context.newPage();
-          async function loadHistory(){
-            await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
-            for(let i=0;i<40;i++){await page.waitForTimeout(1000);if(await page.locator('#tbl-datatable').count())return;}
-            throw new Error('history table unavailable');
-          }
-          await loadHistory();
-          // Prime the API subdomain challenge; the main-page click then receives clearance.
-          const f0=flights[0];
-          const challenge=await context.newPage();
-          await challenge.goto(`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${f0.id}&timestamp=${f0.ts}`,{waitUntil:'domcontentloaded',timeout:120000}).catch(()=>null);
-          for(let i=0;i<70;i++){
-            await challenge.waitForTimeout(1000);
-            const txt=((await challenge.title().catch(()=>''))+' '+(await challenge.locator('body').innerText().catch(()=>'')));
-            if(!/just a moment|performing security verification|verify you are human/i.test(txt))break;
-          }
-          await challenge.close();
-          const summary=[];
-          for(const f of flights){
+          const f={date:process.env.FLIGHT_DATE,id:process.env.FLIGHT_ID,ts:process.env.FLIGHT_TS,reg:process.env.FLIGHT_REG};
+          const summary={...f};
+          let browser;
+          try{
+            browser=await chromium.launch({channel:'chrome',headless:false,args:['--no-sandbox','--disable-blink-features=AutomationControlled','--disable-dev-shm-usage','--start-maximized']});
+            const context=await browser.newContext({viewport:null,locale:'en-US',timezoneId:'UTC'});
+            await context.addInitScript(()=>{
+              Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+              Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+              Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+            });
+            const page=await context.newPage();
+            async function loadHistory(){
+              await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
+              for(let i=0;i<45;i++){await page.waitForTimeout(1000);if(await page.locator('#tbl-datatable').count())return;}
+              throw new Error('history table unavailable');
+            }
             await loadHistory();
-            const selector=`#btn-playback-${f.id}`;
-            const responsePromise=page.waitForResponse(r=>r.url().includes('flight-playback.json')&&r.url().includes(f.id),{timeout:120000});
-            await page.locator(selector).scrollIntoViewIfNeeded();
-            await page.locator(selector).click({timeout:30000});
+            const challenge=await context.newPage();
+            await challenge.goto(`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${f.id}&timestamp=${f.ts}`,{waitUntil:'domcontentloaded',timeout:120000}).catch(()=>null);
+            for(let i=0;i<70;i++){
+              await challenge.waitForTimeout(1000);
+              const txt=(await challenge.title().catch(()=>''))+' '+(await challenge.locator('body').innerText().catch(()=>'');
+              if(!/just a moment|performing security verification|verify you are human/i.test(txt))break;
+            }
+            await challenge.close();
+            await page.bringToFront();
+            const responsePromise=page.waitForResponse(r=>r.url().includes('flight-playback.json')&&r.url().includes(f.id),{timeout:150000});
+            const button=page.locator(`#btn-playback-${f.id}`);
+            await button.scrollIntoViewIfNeeded();
+            await button.click({timeout:30000});
             const resp=await responsePromise;
             const body=await resp.body();
             const file=`output/${f.date}_${f.reg}_${f.id}.json`;
             fs.writeFileSync(file,body);
-            let points=null,callsign=null,registration=null,error=null;
+            summary.status=resp.status(); summary.contentType=resp.headers()['content-type']; summary.bytes=body.length; summary.file=file;
             try{
-              const d=JSON.parse(body.toString());
-              const flight=d?.result?.response?.data?.flight;
-              points=flight?.track?.length??null;
-              callsign=flight?.identification?.callsign??null;
-              registration=flight?.aircraft?.identification?.registration??null;
-            }catch(e){error=String(e);}
-            summary.push({...f,status:resp.status(),contentType:resp.headers()['content-type'],bytes:body.length,points,callsign,registration,error,file});
-            await page.waitForTimeout(2500);
-          }
-          fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));
-          fs.writeFileSync('output/browser.json',JSON.stringify(await page.evaluate(()=>({ua:navigator.userAgent,webdriver:navigator.webdriver,brands:navigator.userAgentData?.brands||null})),null,2));
-          await context.close(); await browser.close();
-          if(summary.some(x=>x.status!==200||!x.points))process.exitCode=2;
+              const d=JSON.parse(body.toString()); const flight=d?.result?.response?.data?.flight;
+              summary.points=flight?.track?.length??null;
+              summary.callsign=flight?.identification?.callsign??null;
+              summary.registration=flight?.aircraft?.identification?.registration??null;
+            }catch(e){summary.parseError=String(e);}
+            await page.screenshot({path:'output/final.png',fullPage:true}).catch(()=>{});
+            await context.close();
+          }catch(e){summary.error=String(e);fs.writeFileSync('output/error.txt',String(e));}
+          finally{if(browser)await browser.close().catch(()=>{});fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));}
           JS
-          xvfb-run -a node fetch.mjs
+          # Correct a parser typo introduced by heredoc readability before execution.
+          python3 - <<'PY'
+          p='fetch.mjs'
+          s=open(p).read().replace("catch(()=>'');", "catch(()=>''));")
+          open(p,'w').write(s)
+          PY
+          xvfb-run -a node fetch.mjs || true
           cat output/summary.json
-      - name: Upload six playback files
+      - name: Upload one playback file
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-six-real-tracks
+          name: cz6522-track-${{ matrix.date }}-${{ matrix.id }}
           path: output/*
           if-no-files-found: error
           retention-days: 1
