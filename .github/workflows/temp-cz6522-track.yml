@@ -22,7 +22,7 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install playwright@latest >/dev/null 2>&1
           npx playwright install chromium --with-deps >/dev/null 2>&1
-          cat > /tmp/fetch.mjs <<'JS'
+          cat > fetch.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
           const browser = await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled','--no-sandbox']});
@@ -61,7 +61,7 @@ jobs:
           await browser.close();
           if (!wanted.length) process.exitCode=2;
           JS
-          node /tmp/fetch.mjs || true
+          node fetch.mjs || true
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
       - name: Upload browser results
         uses: actions/upload-artifact@v4
