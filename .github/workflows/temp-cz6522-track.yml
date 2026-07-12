@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Capture playback through the site UI
+      - name: Capture playback through one browser page
         shell: bash
         run: |
           set -euxo pipefail
@@ -25,22 +25,18 @@ jobs:
           cat > fetch.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
-          const historyUrl='https://www.flightradar24.com/data/flights/cz6522';
           const browser=await chromium.launch({headless:true,args:['--disable-blink-features=AutomationControlled','--no-sandbox']});
           const context=await browser.newContext({
             userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             viewport:{width:1440,height:1000}, locale:'en-US', timezoneId:'UTC'
           });
-          async function loadHistory(page){
-            await page.goto(historyUrl,{waitUntil:'domcontentloaded',timeout:120000});
-            for(let i=0;i<15;i++){
-              await page.waitForTimeout(4000);
-              if(await page.locator('#tbl-datatable').count()) return;
-            }
-            throw new Error('history table not available: '+await page.title());
-          }
           const page=await context.newPage();
-          await loadHistory(page);
+          await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
+          for(let i=0;i<15;i++){
+            await page.waitForTimeout(4000);
+            if(await page.locator('#tbl-datatable').count()) break;
+          }
+          if(!(await page.locator('#tbl-datatable').count())) throw new Error('history table unavailable: '+await page.title());
           const rows=await page.locator('#tbl-datatable tbody tr').evaluateAll(trs=>trs.map(tr=>{
             const b=tr.querySelector('.btn-playback');
             return b?{text:tr.innerText.replace(/\s+/g,' ').trim(),flight_id:b.getAttribute('data-flight-hex'),timestamp:b.getAttribute('data-timestamp')}:null;
@@ -50,11 +46,9 @@ jobs:
           const summary=[];
           for(let i=0;i<wanted.length;i++){
             const r=wanted[i];
-            await loadHistory(page);
             const selector=`#btn-playback-${r.flight_id}`;
-            await page.locator(selector).scrollIntoViewIfNeeded();
-            const responsePromise=page.waitForResponse(resp=>resp.url().includes('flight-playback.json')&&resp.url().includes(r.flight_id),{timeout:120000});
-            await page.locator(selector).click({timeout:30000});
+            const responsePromise=page.waitForResponse(resp=>resp.url().includes('flight-playback.json'),{timeout:120000});
+            await page.locator(selector).click({force:true,timeout:30000});
             const resp=await responsePromise;
             const body=await resp.body();
             const fn=`output/playback_${i}_${r.flight_id}.json`;
@@ -62,20 +56,19 @@ jobs:
             const rec={...r,url:resp.url(),status:resp.status(),bytes:body.length,contentType:resp.headers()['content-type'],file:fn};
             summary.push(rec);
             console.log(JSON.stringify(rec));
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(1500);
           }
           fs.writeFileSync('output/summary.json',JSON.stringify(summary,null,2));
           fs.writeFileSync('output/cookies.json',JSON.stringify(await context.cookies(),null,2));
           await page.screenshot({path:'output/final-page.png',fullPage:true});
           await browser.close();
-          if(summary.length!==wanted.length||summary.some(x=>x.status!==200||x.bytes<1000)) process.exitCode=2;
           JS
           node fetch.mjs || true
           find output -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
       - name: Upload captured playback
         uses: actions/upload-artifact@v4
         with:
-          name: cz6522-browser-click-playback
+          name: cz6522-browser-click-playback-v2
           path: output/*
           if-no-files-found: error
           retention-days: 1
