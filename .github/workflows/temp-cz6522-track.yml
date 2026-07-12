@@ -1,0 +1,104 @@
+name: Temporary CZ6522 real-browser playback extraction
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Use headed Google Chrome to retrieve playback
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          npm init -y >/dev/null 2>&1
+          npm install playwright@latest >/dev/null 2>&1
+          cat > fetch.mjs <<'JS'
+          import { chromium } from 'playwright';
+          import fs from 'fs';
+          const id='409b6d74', ts='1783735500';
+          const api=`https://api.flightradar24.com/common/v1/flight-playback.json?flightId=${id}&timestamp=${ts}`;
+          const browser=await chromium.launch({channel:'chrome',headless:false,args:['--no-sandbox','--disable-blink-features=AutomationControlled','--disable-dev-shm-usage','--start-maximized']});
+          const context=await browser.newContext({viewport:null,locale:'en-US',timezoneId:'UTC',recordHar:{path:'output/session.har',content:'embed'}});
+          await context.addInitScript(()=>{
+            Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+            Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+            Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+          });
+          const results=[];
+          async function saveResponse(label,resp){
+            let b=Buffer.alloc(0); try{b=await resp.body();}catch{}
+            fs.writeFileSync(`output/${label}.bin`,b);
+            results.push({label,url:resp.url(),status:resp.status(),ct:resp.headers()['content-type'],bytes:b.length});
+            return b;
+          }
+          // Establish a normal main-site browser session first.
+          const page=await context.newPage();
+          await page.goto('https://www.flightradar24.com/data/flights/cz6522',{waitUntil:'domcontentloaded',timeout:120000});
+          for(let i=0;i<30;i++){await page.waitForTimeout(1000);if(await page.locator('#tbl-datatable').count())break;}
+          fs.writeFileSync('output/browser.json',JSON.stringify(await page.evaluate(()=>({ua:navigator.userAgent,webdriver:navigator.webdriver,brands:navigator.userAgentData?.brands||null,title:document.title})),null,2));
+          // Open the API URL as a real document so a managed challenge can execute.
+          const challenge=await context.newPage();
+          try{
+            const r=await challenge.goto(api,{waitUntil:'domcontentloaded',timeout:120000});
+            if(r)await saveResponse('api_initial',r);
+            for(let i=0;i<60;i++){
+              await challenge.waitForTimeout(1000);
+              const title=await challenge.title().catch(()=>"");
+              const txt=await challenge.locator('body').innerText().catch(()=>"");
+              if(i%10===0)await challenge.screenshot({path:`output/challenge_${i}.png`});
+              if(!/just a moment|performing security verification|verify you are human/i.test(title+' '+txt))break;
+            }
+            fs.writeFileSync('output/api_page.html',await challenge.content());
+            fs.writeFileSync('output/api_text.txt',await challenge.locator('body').innerText().catch(()=>''));
+            await challenge.screenshot({path:'output/api_final.png',fullPage:true});
+          }catch(e){results.push({label:'api_navigation',error:String(e)});}
+          // Return to the history page and let FR24's own click handler issue the request.
+          const captured=[];
+          page.on('response',async resp=>{
+            if(resp.url().includes('flight-playback.json')){
+              const b=await saveResponse(`click_${captured.length}`,resp);
+              captured.push({url:resp.url(),status:resp.status(),bytes:b.length,ct:resp.headers()['content-type']});
+            }
+          });
+          try{
+            await page.bringToFront();
+            const btn=page.locator(`#btn-playback-${id}`);
+            await btn.scrollIntoViewIfNeeded();
+            await btn.click({timeout:30000});
+            await page.waitForTimeout(20000);
+            await page.screenshot({path:'output/after_click.png',fullPage:true});
+            fs.writeFileSync('output/after_click.html',await page.content());
+          }catch(e){results.push({label:'natural_click',error:String(e)});}
+          // Try request again after challenge and natural click.
+          try{
+            const r=await context.request.get(api,{headers:{referer:'https://www.flightradar24.com/data/flights/cz6522',origin:'https://www.flightradar24.com',accept:'application/json,text/plain,*/*'},timeout:120000});
+            await saveResponse('api_after',r);
+          }catch(e){results.push({label:'api_after',error:String(e)});}
+          // Test the page's disabled KML control through a real browser navigation.
+          try{
+            const kml=`https://www.flightradar24.com/download/?file=kml&trailLimit=0&flight=${id}&history=${ts}`;
+            const kp=await context.newPage(); const r=await kp.goto(kml,{waitUntil:'domcontentloaded',timeout:120000});
+            if(r)await saveResponse('kml_document',r);
+            fs.writeFileSync('output/kml_page.html',await kp.content());
+          }catch(e){results.push({label:'kml_navigation',error:String(e)});}
+          fs.writeFileSync('output/cookies.json',JSON.stringify(await context.cookies(),null,2));
+          fs.writeFileSync('output/results.json',JSON.stringify(results,null,2));
+          fs.writeFileSync('output/captured.json',JSON.stringify(captured,null,2));
+          await context.close(); await browser.close();
+          JS
+          xvfb-run -a node fetch.mjs || true
+          find output -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+      - name: Upload real-browser results
+        uses: actions/upload-artifact@v4
+        with:
+          name: cz6522-real-browser-playback
+          path: output/*
+          if-no-files-found: error
+          retention-days: 1
